@@ -27,7 +27,6 @@
     line-height: 1.2;
     word-wrap: break-word;
     overflow-wrap: break-word;
-    /* font-size set dynamically by JS */
   }
   .final { color: #fff; }
   .interim { color: #888; }
@@ -77,23 +76,27 @@
   let wakeLock = null;
 
   // --- Tunable behavior ---
-  const MAX_CHARS = 250;
-  const SILENCE_CLEAR_MS = 10000;
+  const MAX_CHARS = 250;       // rolling subtitle buffer length
   const WATCHDOG_MS = 45000;
-  const MAX_FONT_VH = 12;   // start big
-  const MIN_FONT_VH = 3.5;  // floor so it stays readable
+  const MAX_FONT_VH = 12;
+  const MIN_FONT_VH = 3.5;
 
   let displayBuffer = '';
-  let silenceTimer = null;
   let watchdogTimer = null;
 
   function setStatus(state) { statusEl.className = state || ''; }
 
-  function trimToMaxChars(text) {
-    if (text.length <= MAX_CHARS) return text;
-    const cut = text.slice(text.length - MAX_CHARS);
+  // Subtitle-style rolling: keep last MAX_CHARS, drop older text from front.
+  function appendToBuffer(newText) {
+    const combined = displayBuffer ? displayBuffer + ' ' + newText : newText;
+    if (combined.length <= MAX_CHARS) {
+      displayBuffer = combined;
+      return;
+    }
+    // Trim from start at a word boundary
+    const cut = combined.slice(combined.length - MAX_CHARS);
     const spaceIdx = cut.indexOf(' ');
-    return spaceIdx > 0 ? cut.slice(spaceIdx + 1) : cut;
+    displayBuffer = spaceIdx > 0 ? cut.slice(spaceIdx + 1) : cut;
   }
 
   // Binary-search the largest font size that fits within the wrap container.
@@ -106,11 +109,9 @@
     let lo = MIN_FONT_VH, hi = MAX_FONT_VH;
     let best = MIN_FONT_VH;
 
-    // Binary search to ~0.25vh precision
     for (let i = 0; i < 8; i++) {
       const mid = (lo + hi) / 2;
       transcriptEl.style.fontSize = (mid * vh) + 'px';
-      // Force reflow
       const fitsH = transcriptEl.scrollHeight <= containerH;
       const fitsW = transcriptEl.scrollWidth <= containerW;
       if (fitsH && fitsW) {
@@ -134,14 +135,6 @@
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  function resetSilenceTimer() {
-    if (silenceTimer) clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => {
-      displayBuffer = '';
-      render('');
-    }, SILENCE_CLEAR_MS);
-  }
-
   function buildRecognizer() {
     const r = new SR();
     r.lang = 'tr-TR';
@@ -155,14 +148,11 @@
         const res = e.results[i];
         const text = res[0].transcript.trim();
         if (res.isFinal) {
-          if (text) {
-            displayBuffer = trimToMaxChars((displayBuffer ? displayBuffer + ' ' : '') + text);
-          }
+          if (text) appendToBuffer(text);
         } else {
           interim += text + ' ';
         }
       }
-      resetSilenceTimer();
       render(interim.trim());
     };
 
@@ -219,7 +209,6 @@
     }
   });
 
-  // Refit text on rotation/resize
   window.addEventListener('resize', () => fitText());
   window.addEventListener('orientationchange', () => setTimeout(fitText, 200));
 
