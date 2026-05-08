@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Dede</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; padding: 4vh 4vw; }
+
+  #start {
+    background: #fff; color: #000; border: none; border-radius: 24px;
+    padding: 6vh 10vw; font-size: 8vh; font-weight: 700; cursor: pointer;
+  }
+
+  #transcript-wrap { display: none; width: 100%; height: 100%; align-items: center; justify-content: center; text-align: center; }
+  #transcript {
+    font-size: 9vh; font-weight: 600; line-height: 1.25;
+    max-height: 90vh; overflow: hidden; word-wrap: break-word;
+  }
+  .final { color: #fff; }
+  .interim { color: #888; }
+
+  #status {
+    position: fixed; top: 12px; right: 12px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #555; transition: background 0.2s;
+  }
+  #status.listening { background: #2ecc71; }
+  #status.error { background: #e74c3c; }
+
+  #hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    font-size: 2.2vh; color: #555;
+  }
+</style>
+</head>
+<body>
+
+<button id="start">Başlat</button>
+
+<div id="transcript-wrap">
+  <div id="transcript"></div>
+</div>
+
+<div id="status"></div>
+<div id="hint" style="display:none;">dokun: duraklat</div>
+
+<script>
+(() => {
+  const startBtn = document.getElementById('start');
+  const wrap = document.getElementById('transcript-wrap');
+  const transcriptEl = document.getElementById('transcript');
+  const statusEl = document.getElementById('status');
+  const hintEl = document.getElementById('hint');
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    startBtn.textContent = 'Tarayıcı desteklenmiyor';
+    startBtn.disabled = true;
+    return;
+  }
+
+  let recognition = null;
+  let shouldBeListening = false;
+  let wakeLock = null;
+  // Keep last N final segments only, so display stays clean.
+  const MAX_FINALS = 3;
+  let finals = [];
+
+  function setStatus(state) {
+    statusEl.className = state || '';
+  }
+
+  function render(interim) {
+    const finalText = finals.join(' ');
+    transcriptEl.innerHTML =
+      `<span class="final">${escapeHtml(finalText)}</span>` +
+      (interim ? ` <span class="interim">${escapeHtml(interim)}</span>` : '');
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function buildRecognizer() {
+    const r = new SR();
+    r.lang = 'tr-TR';
+    r.continuous = true;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+
+    r.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        const text = res[0].transcript.trim();
+        if (res.isFinal) {
+          if (text) {
+            finals.push(text);
+            if (finals.length > MAX_FINALS) finals.shift();
+          }
+        } else {
+          interim += text + ' ';
+        }
+      }
+      render(interim.trim());
+    };
+
+    r.onerror = (e) => {
+      console.warn('SR error:', e.error);
+      // 'no-speech' and 'aborted' are normal, don't flag.
+      if (e.error !== 'no-speech' && e.error !== 'aborted') {
+        setStatus('error');
+      }
+    };
+
+    r.onend = () => {
+      setStatus('');
+      // The critical iOS workaround: auto-restart immediately if user hasn't paused.
+      if (shouldBeListening) {
+        try {
+          r.start();
+          setStatus('listening');
+        } catch (err) {
+          // Sometimes start() throws if called too fast; retry once.
+          setTimeout(() => {
+            if (shouldBeListening) {
+              try { r.start(); setStatus('listening'); } catch(_) { setStatus('error'); }
+            }
+          }, 250);
+        }
+      }
+    };
+
+    r.onstart = () => setStatus('listening');
+
+    return r;
+  }
+
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch (err) {
+      console.warn('Wake lock failed:', err);
+    }
+  }
+
+  // Re-acquire wake lock when tab becomes visible again.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && shouldBeListening) {
+      requestWakeLock();
+    }
+  });
+
+  function startListening() {
+    shouldBeListening = true;
+    recognition = buildRecognizer();
+    try {
+      recognition.start();
+    } catch (err) {
+      console.warn('start() threw:', err);
+    }
+    requestWakeLock();
+    startBtn.style.display = 'none';
+    wrap.style.display = 'flex';
+    hintEl.style.display = 'block';
+    render('');
+  }
+
+  function togglePause() {
+    if (shouldBeListening) {
+      shouldBeListening = false;
+      if (recognition) recognition.stop();
+      hintEl.textContent = 'dokun: devam et';
+    } else {
+      shouldBeListening = true;
+      recognition = buildRecognizer();
+      try { recognition.start(); } catch(_) {}
+      hintEl.textContent = 'dokun: duraklat';
+    }
+  }
+
+  startBtn.addEventListener('click', startListening);
+  wrap.addEventListener('click', togglePause);
+})();
+</script>
+
+</body>
+</html>
